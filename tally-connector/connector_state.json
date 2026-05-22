@@ -1,0 +1,1 @@
+{"connector_token": "342e95f5ceeb94b853da533c62417e3daa481edff3b120f571264684170e346c", "config": {"company_name": "Mock Company Pvt Ltd", "purchase_ledger": "Purchases", "cgst_ledger_format": "CGST @ {rate}%", "sgst_ledger_format": "SGST @ {rate}%", "igst_ledger_format": "IGST @ {rate}%", "auto_create_ledgers": true}}
