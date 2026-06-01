@@ -1,4 +1,4 @@
-import json, uuid, pathlib
+import os, json, uuid, pathlib
 from fastapi import APIRouter, Depends, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -10,7 +10,7 @@ from services.pipeline import run_pipeline
 
 router = APIRouter()
 
-UPLOADS_DIR = pathlib.Path(__file__).resolve().parent.parent / "uploads"
+UPLOADS_DIR = pathlib.Path(os.getenv("UPLOAD_DIR") or (pathlib.Path(__file__).resolve().parent.parent / "uploads"))
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 

@@ -1,0 +1,32 @@
+# Railway deployment config — lives in the project root.
+# Railway builds the backend Docker image and runs it.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "backend/Dockerfile"
+
+[deploy]
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+restartPolicyType = "ON_FAILURE"
+
+# ── Required environment variables (set in Railway dashboard → Variables) ──
+#
+# APP_ENV=production
+# JWT_SECRET=<random 32+ char string>
+# INFRA_MASTER_KEY=<urlsafe-base64 32-byte key — MUST stay constant forever,
+#                   or stored provider credentials can't be decrypted>
+# GEMINI_API_KEY=<your key>
+# GEMINI_MODEL=models/gemma-4-31b-it
+# RESEND_API_KEY=<optional; falls back to in-memory log>
+# RESEND_FROM_EMAIL=noreply@yourdomain.com
+# APP_URL=<frontend URL, used in password-reset email links>
+# CORS_ORIGINS=https://your-frontend.vercel.app,http://localhost:5173
+#
+# ── Persistence (IMPORTANT) ────────────────────────────────────────────
+# Railway's container filesystem is wiped on every deploy. Add a Volume
+# (Railway dashboard → service → Volumes) mounted at /data, then set:
+#
+# DATABASE_URL=sqlite:////data/tally_copilot.db    (4 slashes = absolute path)
+# UPLOAD_DIR=/data/uploads
+#
+# Without the volume, all users / pairings / config reset on each redeploy.

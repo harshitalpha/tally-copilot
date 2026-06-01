@@ -1,18 +1,14 @@
-import pdfplumber, anthropic, json, os, re
-from dotenv import load_dotenv
+"""Invoice extraction — text (pdfplumber) and image (Gemini Vision).
 
-load_dotenv()
+Branches on file_type:
+  PDF  → pdfplumber text extraction → text LLM
+  image → bytes sent directly to vision LLM
 
-PROVIDER = (os.getenv("EXTRACTION_PROVIDER") or "gemini").lower()
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "models/gemma-4-31b-it")
-
-_anthropic = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY")) if os.getenv("ANTHROPIC_API_KEY") else None
-
-_genai_client = None
-if os.getenv("GEMINI_API_KEY"):
-    from google import genai
-    _genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+The LLM provider is resolved through the infra router (registry + routing rules).
+"""
+import pdfplumber
+from infra import router as infra_router
+from infra.telemetry import estimate_tokens
 
 
 SYSTEM_PROMPT = """You are an Indian GST invoice data extraction and classification system.
@@ -57,19 +53,15 @@ Return exactly this structure:
 
 Classification rules:
 - is_valid_tax_invoice = true ONLY if the document is a single tax invoice (or
-  bill of supply) that has: an invoice number, an invoice date, a supplier, and
-  at least one line item with a non-zero amount.
-- is_valid_tax_invoice = false for: ledger statements (showing multiple
-  vouchers), estimates / quotes / proforma, receipts, delivery challans,
-  purchase orders, bank statements, screenshots, anything that is not itself a
-  posted tax invoice. If you see multiple invoice/voucher numbers in the same
-  document, it is NOT a single tax invoice — set false.
-- rejection_reason: short human sentence when false. Example: "This is a
-  customer ledger statement covering 8 sale vouchers, not a single tax
-  invoice." Null when true.
+  bill of supply) with: an invoice number, a date, a supplier, and at least one
+  line item with a non-zero amount.
+- is_valid_tax_invoice = false for: ledger statements (multiple vouchers),
+  estimates/quotes/proforma, receipts, delivery challans, purchase orders,
+  bank statements, screenshots of anything other than a posted tax invoice.
+  If you see multiple invoice/voucher numbers, set false.
+- rejection_reason: short sentence when false, null when true.
 
-Extraction rules (apply even when is_valid_tax_invoice is false — fill what you
-can so the user sees context, but never invent missing data):
+Extraction rules:
 1. Amounts are plain numbers. Strip Rs and commas. "1,23,456.00" -> 123456.0
 2. Dates to YYYY-MM-DD. "10/04/24" -> "2024-04-10"
 3. GSTIN: exactly 15 chars. Return null if not found.
@@ -77,6 +69,27 @@ can so the user sees context, but never invent missing data):
 5. reverse_charge true only if invoice explicitly says "Reverse Charge: Yes".
 6. Missing fields return null. Never guess."""
 
+_MIME_MAP = {
+    "jpg":  "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png":  "image/png",
+    "heic": "image/heic",
+    "webp": "image/webp",
+}
+
+IMAGE_TYPES = set(_MIME_MAP.keys())
+
+
+def extract_and_classify(file_path: str, file_type: str,
+                         user_id: str | None = None) -> tuple[dict, str]:
+    """Main entry point. Returns (extracted_dict, extraction_method)."""
+    ft = (file_type or "").lower().lstrip(".")
+    if ft in IMAGE_TYPES:
+        return _from_image(file_path, ft, user_id)
+    return _from_pdf(file_path, user_id)
+
+
+# ── PDF path ─────────────────────────────────────────────────────────────────
 
 def extract_text(pdf_path: str) -> tuple[str, str]:
     text = _extract_with_pdfplumber(pdf_path)
@@ -97,49 +110,58 @@ def _extract_with_pdfplumber(path: str) -> str:
     return full.strip()
 
 
-def _strip_json_fences(raw: str) -> str:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        # ```json ... ``` or ``` ... ```
-        m = re.search(r"```(?:json)?\s*(.*?)```", raw, re.DOTALL)
-        if m:
-            raw = m.group(1)
-    return raw.strip("` \n")
+def _from_pdf(file_path: str, user_id: str | None) -> tuple[dict, str]:
+    text, method = extract_text(file_path)
+    prompt = f"{SYSTEM_PROMPT}\n\nExtract invoice data:\n\n{text[:50000]}"
+    req_tokens = estimate_tokens(prompt)
 
-
-def _llm_extract_claude(text: str) -> dict:
-    if not _anthropic:
-        raise RuntimeError("ANTHROPIC_API_KEY not set")
-    response = _anthropic.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=1500,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"Extract invoice data:\n\n{text}"}],
+    result = infra_router.call(
+        surface="llm", task="extract_invoice",
+        fn=lambda adapter: adapter.extract_json(prompt, max_tokens=8192),
+        setup_ctx=lambda ctx: setattr(ctx, "request_tokens", req_tokens),
+        user_id=user_id,
     )
-    raw = response.content[0].text
-    return json.loads(_strip_json_fences(raw))
+    return result, method
 
 
-def _llm_extract_gemini(text: str) -> dict:
-    if not _genai_client:
-        raise RuntimeError("GEMINI_API_KEY not set")
-    # Gemma models don't support system_instruction; fold the system prompt into the user message.
-    prompt = f"{SYSTEM_PROMPT}\n\nExtract invoice data:\n\n{text}"
-    response = _genai_client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config={"temperature": 0, "max_output_tokens": 8192},
+# ── Image path ────────────────────────────────────────────────────────────────
+
+def _from_image(file_path: str, file_type: str, user_id: str | None) -> tuple[dict, str]:
+    mime = _MIME_MAP[file_type]
+    with open(file_path, "rb") as f:
+        image_bytes = f.read()
+
+    prompt = (
+        f"{SYSTEM_PROMPT}\n\n"
+        "Extract invoice data from this image. "
+        "If the image is not a single tax invoice, set is_valid_tax_invoice to false."
     )
-    raw = response.text
-    return json.loads(_strip_json_fences(raw))
+
+    def _do(adapter):
+        if hasattr(adapter, "extract_json_from_image"):
+            return adapter.extract_json_from_image(image_bytes, mime, prompt, max_tokens=8192)
+        # Fallback: encode as base64 text description — should not happen if Gemini is configured
+        raise RuntimeError(
+            f"Adapter {type(adapter).__name__} does not support image extraction. "
+            "Configure a Gemini provider in /settings/infra."
+        )
+
+    result = infra_router.call(
+        surface="llm", task="extract_invoice_image",
+        fn=_do,
+        user_id=user_id,
+    )
+    return result, "gemini_vision"
 
 
-def llm_extract(text: str) -> dict:
-    # Gemma 27B/31B and Claude both handle 50k+ tokens of input easily; the old 4000-char
-    # cap was dropping the totals/tax rows that sit at the end of most invoices.
-    truncated = text[:50000]
-    if PROVIDER == "claude":
-        return _llm_extract_claude(truncated)
-    if PROVIDER == "gemini":
-        return _llm_extract_gemini(truncated)
-    raise RuntimeError(f"Unknown EXTRACTION_PROVIDER: {PROVIDER}")
+# ── Legacy compat (pipeline still calls llm_extract directly for text) ────────
+
+def llm_extract(text: str, user_id: str | None = None) -> dict:
+    prompt = f"{SYSTEM_PROMPT}\n\nExtract invoice data:\n\n{text[:50000]}"
+    req_tokens = estimate_tokens(prompt)
+    return infra_router.call(
+        surface="llm", task="extract_invoice",
+        fn=lambda adapter: adapter.extract_json(prompt, max_tokens=8192),
+        setup_ctx=lambda ctx: setattr(ctx, "request_tokens", req_tokens),
+        user_id=user_id,
+    )

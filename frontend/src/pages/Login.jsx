@@ -15,12 +15,13 @@ export default function Login() {
     try {
       const r = await login({ email, password })
       localStorage.setItem('token', r.token)
-      nav(r.user.is_onboarded ? '/dashboard' : '/onboarding')
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy(false)
-    }
+      if (!r.user.email_verified) {
+        nav('/verify-email')
+      } else {
+        nav(r.user.is_onboarded ? '/dashboard' : '/onboarding')
+      }
+    } catch (e) { setErr(e.message) }
+    finally { setBusy(false) }
   }
 
   return (
@@ -30,16 +31,18 @@ export default function Login() {
         <p className="mb-6 text-sm text-slate-500">Welcome back to Tally Co-pilot</p>
 
         <label className="mb-1 block text-sm font-medium">Email</label>
-        <input
-          type="email" value={email} required onChange={e => setEmail(e.target.value)}
-          className="mb-3 w-full rounded border border-slate-300 px-3 py-2"
-        />
+        <input type="email" value={email} required onChange={e => setEmail(e.target.value)}
+          className="mb-3 w-full rounded border border-slate-300 px-3 py-2" />
 
         <label className="mb-1 block text-sm font-medium">Password</label>
-        <input
-          type="password" value={password} required onChange={e => setPassword(e.target.value)}
-          className="mb-4 w-full rounded border border-slate-300 px-3 py-2"
-        />
+        <input type="password" value={password} required onChange={e => setPassword(e.target.value)}
+          className="mb-1 w-full rounded border border-slate-300 px-3 py-2" />
+
+        <div className="mb-4 text-right">
+          <Link to="/forgot-password" className="text-xs text-slate-500 hover:text-slate-900 underline">
+            Forgot password?
+          </Link>
+        </div>
 
         {err && <div className="mb-3 rounded bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</div>}
 
@@ -48,7 +51,8 @@ export default function Login() {
         </button>
 
         <p className="mt-4 text-center text-sm text-slate-500">
-          No account? <Link to="/signup" className="text-slate-900 underline">Sign up</Link>
+          No account?{' '}
+          <Link to="/signup" className="text-slate-900 underline">Sign up</Link>
         </p>
       </form>
     </div>

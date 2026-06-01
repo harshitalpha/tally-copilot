@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "tally-copilot-connector"
+version = "0.2.0"
+description = "Tally Co-pilot connector — runs on the machine where Tally is installed"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+tcc = "connector:main"
+tally-copilot-connector = "connector:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["connector*", "tally_xml*"]

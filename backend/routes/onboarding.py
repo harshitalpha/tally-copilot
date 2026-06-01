@@ -242,14 +242,14 @@ def save_mappings(
 
 
 def _maybe_mark_onboarded(db: Session, user: models.User):
-    wa = (
-        db.query(models.UserWhatsappMetadata)
-        .filter(
-            models.UserWhatsappMetadata.user_id == user.id,
-            models.UserWhatsappMetadata.is_verified == True,
-        )
-        .first()
-    )
+    """
+    Onboarding is complete when:
+      - email is verified (done at signup)
+      - Tally is paired, a company is selected, and ledger mappings are saved
+
+    WhatsApp is now OPTIONAL — users add it later from Settings for hands-free processing.
+    """
+    db.refresh(user)
     tally = (
         db.query(models.UserTallyMetadata)
         .filter(
@@ -258,6 +258,6 @@ def _maybe_mark_onboarded(db: Session, user: models.User):
         )
         .first()
     )
-    if wa and tally and tally.company_name and tally.purchase_ledger:
+    if tally and tally.company_name and tally.purchase_ledger and user.email_verified:
         user.is_onboarded = True
         db.commit()

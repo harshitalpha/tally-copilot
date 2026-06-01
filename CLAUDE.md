@@ -7,10 +7,12 @@
 
 ## What this is
 
-Users register a WhatsApp number once. Any PDF/image invoice they send from that number is:
-**downloaded → AI-extracted (Claude) → GST-validated → pushed to Tally as a Purchase voucher → confirmed back via WhatsApp.**
+Users sign up with email, verify their email via OTP, then connect Tally. From the
+dashboard they can upload invoice PDFs or images. When WhatsApp is wired up (later),
+invoices sent from a registered number are auto-processed.
 
-No human approval. Unregistered numbers get a "please register" reply.
+**Flow:** file uploaded → AI-extracted (Gemini/Claude) → GST-validated → pushed to
+Tally as a Purchase voucher → confirmed via WhatsApp (or dashboard).
 
 ---
 
@@ -19,108 +21,132 @@ No human approval. Unregistered numbers get a "please register" reply.
 ```
 tally-copilot/
 ├── backend/           FastAPI + SQLite, AI pipeline, all routes
-├── frontend/          React + Vite + Tailwind v3, read-only dashboard
-└── tally-connector/   Polling daemon that runs on the user's Tally machine
+│   ├── ports/           LLMClient, ObjectStore, Messenger, EmailClient protocols
+│   ├── adapters/        Vendor implementations (gemini, anthropic, resend, s3, …)
+│   ├── infra/           Registry, router, telemetry, crypto, catalog, seed
+│   ├── routes/          auth, onboarding, actions, documents, whatsapp,
+│   │                    tally_connector, infra, settings, mock
+│   └── services/        extractor, validator, pipeline, whatsapp_sender, email_sender
+├── frontend/          React + Vite + Tailwind v3
+│   └── pages/           Landing, Login, Signup, ForgotPassword, ResetPassword,
+│                        Onboarding, Dashboard, ActionDetail, Settings, Infrastructure
+└── tally-connector/   Polling daemon (installable via pip as tally-copilot-connector)
 ```
 
-The DB (`backend/tally_copilot.db`) is git-ignored / disposable in dev — delete to reset.
+The DB (`backend/tally_copilot.db`) is disposable in dev — delete to reset schema.
 
 ---
 
-## Critical invariant: action status flow
+## Action status flow
 
 ```
-pending → processing → pending_sync → synced
+pending → processing → pending_review (if require_review=True) → pending_sync → synced
                      → failed
 ```
 
-- `pending` / `processing` — pipeline owns it
-- `pending_sync` — **connector** polls for these and pushes to Tally
-- `synced` / `failed` — terminal; triggers WhatsApp confirmation/failure message
-
-WhatsApp confirmation is sent by the **sync-complete** route (after Tally returns voucher_id), NOT by the pipeline. The pipeline only sends failure messages when extraction itself fails.
+- `pending_review` — user must approve in dashboard before connector picks it up
+- `pending_sync` — connector polls for these and pushes to Tally
+- `synced` / `failed` — terminal; WhatsApp confirmation/failure sent
 
 ---
 
-## Action data payload (`UserAction.data` JSON)
+## Auth model
 
-This is the contract between pipeline, connector, and UI. All four parties read/write it.
-
-```json
-{
-  "document_id": "uuid",
-  "source": "whatsapp | dashboard",
-  "sender_phone": "+91… | null",
-  "extraction_method": "pdfplumber | document_ai | null",
-  "extracted_invoice": { /* see complete_architecture.md §5 */ },
-  "validation_errors": [],
-  "validation_warnings": [],
-  "tally_voucher_id": "string | null",
-  "tally_error": "string | null"
-}
-```
+- **Email OTP** at signup — user must verify before onboarding proceeds.
+  `dev_otp` is returned in the signup response when `APP_ENV=development`.
+- **Password reset** via email link (1h expiry). Uses `email_sender.send_password_reset`.
+- **Onboarding completes** when: `email_verified=True` AND Tally paired + company
+  selected + mappings saved. WhatsApp is now **optional** (add from Settings later).
+- **User JWT**: `Authorization: Bearer <token>` (HS256, 24h).
+- **Connector**: `X-Connector-Token` — re-issued on each generate-pairing-code call.
 
 ---
 
-## Auth
+## Infrastructure control plane (`/settings/infra`)
 
-- **User**: JWT `Authorization: Bearer <token>` (HS256, 24h expiry).
-- **Connector**: `X-Connector-Token: <token>` — issued on `POST /api/tally/pair`. Each `generate-pairing-code` call **invalidates the previous connector token**; the connector must re-pair.
+Providers + routing rules live in the DB (encrypted with Fernet). Surfaces:
+- `llm` — Gemini/Claude/OpenAI-compat. Tasks: `extract_invoice`, `extract_invoice_image`
+- `object_store` — local_fs / S3-compat
+- `messenger` — inmemory / Meta Cloud API
+- `email` — inmemory / Resend
+
+On first boot, `infra/seed.py` reads `.env` and creates default rows. After that
+the dashboard owns all config. Registry hot-reloads on `routing_rules.version` bump.
+
+---
+
+## Extraction — PDF vs image
+
+`services/extractor.py:extract_and_classify(file_path, file_type)` branches:
+- **PDF** → pdfplumber text → text LLM via router (`task=extract_invoice`)
+- **image (JPG/PNG/HEIC)** → bytes → Gemini Vision (`task=extract_invoice_image`,
+  adapter must have `extract_json_from_image` — GeminiAdapter does)
+
+Vision model defaults to `gemini-2.0-flash`. Override in `/settings/infra` → Providers
+→ gemini-default → `vision_model` field.
 
 ---
 
 ## How to run (3 terminals)
 
 ```bash
-# T1 — backend
+# T1 — backend (delete tally_copilot.db first if schema changed)
 cd backend && source .venv/bin/activate && uvicorn main:app --reload --port 8000
 
 # T2 — frontend
-cd frontend && npm run dev    # http://localhost:5173
+cd frontend && env HOME=/tmp/x npm run dev   # http://localhost:5173
 
-# T3 — connector (after generating pairing code in dashboard)
+# T3 — connector
 cd tally-connector && python connector.py
 ```
 
 **Required env** (`backend/.env`):
 ```
 APP_ENV=development
-ANTHROPIC_API_KEY=sk-ant-...      # without this the LLM extract step fails -> every invoice ends up `failed`
 JWT_SECRET=anything-for-dev
 WHATSAPP_VERIFY_TOKEN=anything-for-dev
+GEMINI_API_KEY=AIza...              # primary LLM + vision
+RESEND_API_KEY=re_...               # optional; falls back to in-memory log
+RESEND_FROM_EMAIL=noreply@resend.dev
+# ANTHROPIC_API_KEY=sk-ant-...     # optional fallback LLM
+# INFRA_MASTER_KEY=...             # optional; dev uses deterministic fallback key
+# APP_URL=http://localhost:5173    # used in password reset emails
 ```
 
 ---
 
 ## Environment quirks (Python 3.14 macOS)
 
-- **`sqlalchemy>=2.0.36`** — older versions crash on import on 3.14 (`__firstlineno__` symbol collision).
-- **`bcrypt==4.0.1`** — bcrypt 4.1+ breaks passlib's wrap-bug detection with `ValueError: password cannot be longer than 72 bytes`.
-- **Node**: not installed by default; `brew install node` lands at `/opt/homebrew/bin/node`.
-- **npm**: global `~/.npmrc` has legacy `_auth` form that modern npm rejects. Workaround: `env HOME=/tmp/empty-dir npm ...` + project-local `.npmrc` with `registry=https://registry.npmjs.org/`.
+- **`sqlalchemy>=2.0.36`** — older versions crash on import.
+- **`bcrypt==4.0.1`** — bcrypt 4.1+ breaks passlib.
+- **Node**: `brew install node` → `/opt/homebrew/bin/node`.
+- **npm**: `env HOME=/tmp/x npm ...` + project `.npmrc` with `registry=https://registry.npmjs.org/`.
 
 ---
 
-## Known fixes already applied (don't re-introduce)
+## Known fixes (don't re-introduce)
 
-- **Connector error check**: spec had `if "ERRORS>0" in r.text` — but mock Tally returns `<ERRORS>0</ERRORS>` which contains that substring. Fixed to regex `<ERRORS>(\d+)</ERRORS>` checking for non-zero (`tally-connector/connector.py:_has_error`).
-- **ProtectedRoute**: uses react-router's `useLocation` (not `window.location.pathname`) and re-fetches `/me` on path change — needed so an already-onboarded user landing on `/onboarding` redirects to `/dashboard`.
-
----
-
-## Dev mocks (only loaded when `APP_ENV=development`)
-
-- `POST /api/mock/whatsapp/incoming` — simulate inbound WhatsApp message (form: `file`, `sender_phone`).
-- `POST /api/mock/tally/voucher` — returns a fake success XML; set as `TALLY_URL` in connector `.env`.
-- `GET /api/mock/whatsapp/send-log` — every outbound WA message held in-memory.
-- Dashboard's `MockPanel` (dev only) wraps these.
-
-OTPs for WhatsApp registration are returned in the response body as `dev_otp` when `APP_ENV=development`.
+- **Connector error check**: `_has_error()` uses regex `<ERRORS>(\d+)</ERRORS>` — the
+  naive `"ERRORS>0" in text` substring match false-positives on success responses.
+- **ProtectedRoute**: uses `useLocation` + re-fetches `/me` on path change.
+- **Onboarding**: `_maybe_mark_onboarded` no longer requires WhatsApp — only email
+  verified + Tally paired + company + mappings.
 
 ---
 
-## Build/test order (if rebuilding)
+## Deployment
 
-`backend skeleton → auth routes → extractor+validator → mock → tally_connector+onboarding routes → documents+pipeline → whatsapp webhook+sender → actions route → connector script → frontend.`
+- **Backend**: `backend/Dockerfile` + `railway.toml` → Railway.app
+- **Frontend**: `frontend/vercel.json` → Vercel (static, SPA rewrites configured)
+- **Connector**: `pip install tally-copilot-connector` once published, or
+  `cd tally-connector && pip install -e .` for local install
 
-End-to-end smoke test lives in `complete_architecture.md §13`.
+---
+
+## Dev mocks
+
+- `POST /api/mock/whatsapp/incoming` — simulate WhatsApp invoice send
+- `POST /api/mock/tally/voucher` — fake Tally success XML
+- `GET /api/mock/whatsapp/send-log` — outbound message log
+- `GET /api/infra/call-log` — per-provider telemetry
+- Dev panel visible in dashboard when `import.meta.env.DEV`

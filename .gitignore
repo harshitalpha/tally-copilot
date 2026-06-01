@@ -32,3 +32,9 @@ frontend/dist/
 # IDE
 .vscode/
 .idea/
+
+# Connector runtime state (contains auth token)
+tally-connector/connector_state.json
+
+# Test invoice PDFs (customer data — keep out of git)
+*.pdf

@@ -10,7 +10,7 @@ from services.pipeline import run_pipeline
 
 router = APIRouter()
 
-UPLOADS_DIR = pathlib.Path(__file__).resolve().parent.parent / "uploads"
+UPLOADS_DIR = pathlib.Path(os.getenv("UPLOAD_DIR") or (pathlib.Path(__file__).resolve().parent.parent / "uploads"))
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
