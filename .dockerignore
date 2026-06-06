@@ -1,0 +1,13 @@
+# Build context is the repo root; only backend/ is copied into the image.
+# Keep secrets, local state, and unrelated trees out of the build.
+.git/
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/*.db
+**/.env
+**/.env.*
+backend/uploads/
+frontend/
+tally-connector/
+*.pdf
