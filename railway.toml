@@ -6,7 +6,9 @@ builder = "DOCKERFILE"
 dockerfilePath = "backend/Dockerfile"
 
 [deploy]
-startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+# Wrapped in `sh -c` so the shell expands $PORT (Railway injects it). Without the
+# shell, uvicorn receives the literal string "$PORT" and crashes on boot.
+startCommand = "sh -c 'uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}'"
 restartPolicyType = "ON_FAILURE"
 
 # ── Required environment variables (set in Railway dashboard → Variables) ──
